@@ -56,11 +56,11 @@ class DeepSeekProvider(LLMProvider):
     
     def __init__(self, model_name: str = "deepseek-reasoner", api_key: Optional[str] = None):
         self.model_name = model_name
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        self.api_key = api_key or os.environ.get("ARK_API_KEY")
         if not self.api_key:
             raise ValueError("DeepSeek API key not provided and not found in environment variables")
         
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url="https://ark.cn-beijing.volces.com/api/v3")
     
     async def generate(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         if "o1-mini" in self.model_name:
@@ -73,6 +73,7 @@ class DeepSeekProvider(LLMProvider):
             **kwargs
         )
         if response.choices[0].finish_reason in ['length', 'content_filter']:
+            print(f'[DEBUG] DeepSeek response finish_reason: {response.choices[0].finish_reason}')
             raise ValueError("Content filtered or length exceeded")
         return LLMResponse(
             content=response.choices[0].message.content,

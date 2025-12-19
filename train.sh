@@ -16,7 +16,7 @@ USE_BASE="algorithm.kl_ctrl.kl_coef=0.001 actor_rollout_ref.actor.kl_loss_coef=0
 
 # Section 4.1 - Filtering and critic
 # 0.25
-# python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES="6" trainer.experiment_name=Instruct-sokoban-ppo-rolloutfilter0.25 actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_PPO
-# python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES="7" trainer.experiment_name=Instruct-sokoban-grpo actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_GRPO
+# python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES="5" trainer.n_gpus_per_node=1 trainer.experiment_name=Instruct-sokoban-ppo-rolloutfilter0.25 actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_PPO
+python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES="6" trainer.n_gpus_per_node=1 trainer.experiment_name=Instruct-sokoban-grpo actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_GRPO
 
-python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES=\"3,4,5\" trainer.n_gpus_per_node=2 trainer.experiment_name=qwen3-4b-sokoban-ppo-rolloutfilter0.25 actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_PPO
+# python train.py --config-name _2_sokoban system.CUDA_VISIBLE_DEVICES=\"3,4,5\" trainer.n_gpus_per_node=2 trainer.experiment_name=qwen3-4b-sokoban-ppo-rolloutfilter0.25 actor_rollout_ref.rollout.rollout_filter_ratio=0.25 $USE_PPO

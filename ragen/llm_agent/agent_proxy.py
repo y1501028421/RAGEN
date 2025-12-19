@@ -142,7 +142,13 @@ class ApiCallingWrapperWg:
         ), f"Failed to generate responses for the following messages: {failed_messages}"
 
         texts = [result["response"] for result in results]
-        print(f"[DEBUG] texts: {texts}")
+                
+        print(f"[DEBUG] texts (count: {len(texts)}):")
+        for i, text in enumerate(texts):
+            print(f"--- [Text {i}] ---")
+            print(text)
+        print("------------------")
+        
         lm_outputs = DataProto()
         lm_outputs.non_tensor_batch = {
             "response_texts": texts,

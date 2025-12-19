@@ -1,0 +1,142 @@
+defaults:
+  - base # this is a symbolic link to the verl/verl/trainer/config/ppo_trainer.yaml file
+  - _self_
+
+# 覆盖 reward_model 配置，API 评估不需要
+reward_model: null
+
+trainer:
+  project_name: qwen3_eval_api_llm
+  experiment_name: deepseekr1_20_CoordSokoban
+  local_log_dir: "results/"
+  generations_to_log_to_wandb: 
+    val: 256
+  logger: [ 'console', 'swanlab']
+
+
+model_config:
+  model_name: qwen3-8b # should be registered in model_info
+  max_concurrency: 20
+
+model_info:
+  qwen3-8b:
+    provider_name: infiniai
+    model_name: qwen3-8b
+    generation_kwargs:
+      temperature: 0
+      max_completion_tokens: 65536
+      extra_body:
+        enable_thinking:
+          True
+      stream: True
+    stream_options:
+      include_usage: True
+
+  Qwen2.5-7B-Instruct:
+    provider_name: together
+    model_name: Qwen/Qwen2.5-7B-Instruct-Turbo
+    generation_kwargs:
+      temperature: 0
+      max_tokens: 512
+  Qwen2.5-72B-Instruct:
+    provider_name: together
+    model_name: Qwen/Qwen2.5-72B-Instruct-Turbo
+    generation_kwargs:
+      temperature: 0
+      max_tokens: 512
+  claude-3.7:
+    provider_name: anthropic
+    model_name: claude-3-7-sonnet-20250219
+    generation_kwargs:
+      temperature: 0
+      max_tokens: 512 # max_completion_tokens if o1-mini
+  gpt-4o:
+    provider_name: openai
+    model_name: gpt-4o
+    generation_kwargs:
+      temperature: 0
+      max_tokens: 512 # max_completion_tokens if o1-mini
+  deepseek-r1-250528:
+    provider_name: deepseek
+    model_name: deepseek-r1-250528
+    generation_kwargs:
+      temperature: 0
+      max_completion_tokens: 65536
+  deepseek-v3:
+    provider_name: deepseek
+    model_name: deepseek-v3-250324
+    generation_kwargs:
+      temperature: 0
+      max_completion_tokens: 512
+  deepseek-v3-2:
+    provider_name: deepseek
+    model_name: deepseek-v3-2-251201
+    generation_kwargs:
+      temperature: 0
+      max_completion_tokens: 65536
+      extra_body:
+        thinking:
+          type: enabled
+      # reasoning_effort: "low"
+
+custom_envs:
+  SimpleSokoban:
+    env_type: sokoban
+    max_actions_per_traj: 10 # used in environment state manager to control the actual max actions executed per trajectory
+    env_instruction: |
+      You are solving the Sokoban puzzle. 
+      You are the player and you need to push all boxes to targets. 
+      When you are right next to a box, you can push it by moving in the same direction. 
+      You cannot push a box through a wall, and you cannot pull a box. 
+      The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>
+    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
+    parallel_friendly: false
+    max_workers: 32
+    env_config: # keys should be a subset of SokobanConfig
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: 100
+  
+  CoordSokoban:
+    env_type: sokoban
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets.
+      You are provided with a symbol grid and the zero-indexed coordinates of the player, each box, and each target. 
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (5, 5). 
+      When you are exactly next to a box, you can push it by moving in the same direction. 
+      You cannot push a box through a wall, and you cannot pull a box.
+      The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>.
+    max_tokens: 120
+    parallel_friendly: false
+    max_workers: 32
+    env_config: # keys should be a subset of SokobanConfig
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: 100
+      observation_format: "grid_coord"
+
+
+agent_proxy:
+  max_context_window: -1 # set a value > 0 to enable context window for long trajectory
+  max_turn: 10
+  action_sep: "||"
+  max_actions_per_turn: 10 # how many actions can be output at most in a single turn
+  use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
+  enable_think: False # False -> no think RL
+  reward_normalization:
+    grouping: "state" # state / batch / inductive
+    method: "identity" # asym_clip / identity / mean_std
+
+
+es_manager:
+  val:
+    env_groups: 100
+    group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
+    env_configs:
+      tags: ["CoordSokoban"]
+      n_groups: [100] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+
+
