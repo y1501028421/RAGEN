@@ -10,7 +10,7 @@ trainer:
   experiment_name: deepseekr1_20_CoordSokoban
   local_log_dir: "results/"
   generations_to_log_to_wandb: 
-    val: 256
+    val: 128
   logger: [ 'console', 'swanlab']
 
 
