@@ -66,7 +66,17 @@ class DeepSeekProvider(LLMProvider):
         if "o1-mini" in self.model_name:
             if messages[0]["role"] == "system":
                 messages = messages[1:]
-            
+        from omegaconf import OmegaConf
+        if OmegaConf.is_config(kwargs):
+            # 情况 A: 纯 OmegaConf 对象 -> 彻底转为 dict
+            kwargs = OmegaConf.to_container(kwargs, resolve=True)
+        elif isinstance(kwargs, dict):
+            # 情况 B: 外层是 dict，但里层(extra_body)可能还是 OmegaConf 对象
+            # 重新构建字典，确保所有值都被递归转换
+            kwargs = {
+                k: (OmegaConf.to_container(v, resolve=True) if OmegaConf.is_config(v) else v)
+                for k, v in kwargs.items()
+            }
         response = await self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
@@ -75,6 +85,8 @@ class DeepSeekProvider(LLMProvider):
         if response.choices[0].finish_reason in ['length', 'content_filter']:
             print(f'[DEBUG] DeepSeek response finish_reason: {response.choices[0].finish_reason}')
             raise ValueError("Content filtered or length exceeded")
+        print(f'[DEBUG] final content: {response.choices[0].message.content}')
+        print(f'[DEBUG] final reasoning_content: {response.choices[0].message.reasoning_content}')
         return LLMResponse(
             content=response.choices[0].message.content,
             model_name=response.model
@@ -143,6 +155,88 @@ class TogetherProvider(LLMProvider):
             model_name=response.model
         )
 
+class InfiniaiProvider(LLMProvider):
+    """InfiniaiProvider API provider implementation"""
+    
+    def __init__(self, model_name: str = "gpt-4o", api_key: Optional[str] = None):
+        self.model_name = model_name
+        self.api_key = api_key or os.environ.get("INFINIAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("InfiniaiProvider API key not provided and not found in environment variables")
+        
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url="https://cloud.infini-ai.com/maas/v1")
+    
+    async def generate(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
+        # 1. 检测是否开启了流式传输，默认为 False
+        is_stream = kwargs.get("stream", False)
+        
+        if is_stream:
+            response_stream = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            full_content = []
+            full_reasoning = []
+            final_model = self.model_name
+            
+            async for chunk in response_stream:
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                
+                # 拼接常规内容
+                if delta.content:
+                    full_content.append(delta.content)
+                
+                # 拼接思考内容 (DeepSeek/R1 风格)
+                # 注意：不同库版本可能放在 delta.reasoning_content 或 delta.model_extra['reasoning_content']
+                reasoning_chunk = getattr(delta, 'reasoning_content', None)
+                if reasoning_chunk:
+                    full_reasoning.append(reasoning_chunk)
+                    
+                if chunk.model:
+                    final_model = chunk.model
+
+            content="".join(full_content)
+            reasoning_content="".join(full_reasoning) if full_reasoning else None
+            print(f'[DEBUG] final streamed content: {content}')
+            print(f'[DEBUG] final streamed reasoning_content: {reasoning_content}')
+            return LLMResponse(
+                content="".join(full_content),
+                model_name=final_model,
+                # 将思考内容通过 reasoning_content 字段返回
+                # reasoning_content="".join(full_reasoning) if full_reasoning else None
+            )
+
+        else:
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            choice = response.choices[0]
+            
+            # 检查过滤原因
+            if choice.finish_reason in ['length', 'content_filter']:
+                raise ValueError(f"Content filtered or length exceeded: {choice.finish_reason}")
+            
+            message = choice.message
+            
+            # 安全获取 reasoning_content
+            # OpenAI SDK 可能会把非标准字段藏在 model_extra 或直接属性中，使用 getattr 最稳妥
+            reasoning = getattr(message, 'reasoning_content', None)
+            
+            return LLMResponse(
+                content=message.content,
+                model_name=response.model,
+                # 将思考内容通过 reasoning_content 字段返回
+                # reasoning_content=reasoning
+            )
+
 class ConcurrentLLM:
     """Unified concurrent interface for multiple LLM providers"""
     
@@ -168,6 +262,8 @@ class ConcurrentLLM:
                 self.provider = AnthropicProvider(model_name or "claude-3-7-sonnet-20250219", api_key)
             elif provider.lower() == "together":
                 self.provider = TogetherProvider(model_name or "meta-llama/Llama-3-70b-chat-hf", api_key)
+            elif provider.lower() == "infiniai":
+                self.provider = InfiniaiProvider(model_name or "qwen3-8b", api_key)
             else:
                 raise ValueError(f"Unknown provider: {provider}")
         

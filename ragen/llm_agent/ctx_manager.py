@@ -132,7 +132,7 @@ class ContextManager:
                 env_instruction += coord_hint
             if env_config_new.get("action_lookup", False):
                 action_lookup_str = "\nYour available actions are:\n" + ", ".join([f"{v}" for k, v in env_config_new["action_lookup"].items()])
-                action_lookup_str += f"\nYou can make up to {env_config_new['max_actions_per_traj']} actions, separated by the action separator \" " + self.action_sep + " \"\n"
+                action_lookup_str += f"\nYou can take up to {env_config_new['max_actions_per_traj']} actions at a time, separated by the action separator \" " + self.action_sep + " \"\n"
                 env_instruction += action_lookup_str
             prefixes[env_tag] = env_instruction
             env_config_lookup[env_tag] = {'max_tokens': env_config.get("max_tokens", self.config.actor_rollout_ref.rollout.response_length)}
@@ -267,7 +267,8 @@ class ContextManager:
                 for idx, content in enumerate(history):
                     messages[-1]["content"] += f"\nTurn {idx + 1}:\n"
                     if "state" in content:
-                        FORMAT_PROMPT = "<think> [Your thoughts] </think> <answer> [your answer] </answer>" if self.config.agent_proxy.enable_think else "<answer> [your answer] </answer>"
+                        # FORMAT_PROMPT = "<think> [Your thoughts] </think> <answer> [your answer] </answer>" if self.config.agent_proxy.enable_think else "<answer> [your answer] </answer>"
+                        FORMAT_PROMPT = "<answer> [your answer] </answer>" if self.config.agent_proxy.enable_think else "<answer> [your answer] </answer>"
                         LENGTH_PROMPT = f"Max response length: {self.env_config_lookup[env_output['env_id']]['max_tokens']} words (tokens)."
                         # messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Always output: {FORMAT_PROMPT} with no extra text. Strictly follow this format. {LENGTH_PROMPT}\n"
                         messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Always output: {FORMAT_PROMPT} with no extra text. Strictly follow this format.\n"
@@ -281,7 +282,7 @@ class ContextManager:
                 # NOTE: this assertion is important for loss mask computation        
                 assert all(msg["role"] == "assistant" for msg in messages[2::2])
 
-                text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=(not prepare_for_update), tokenize=False)
+                text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=(not prepare_for_update), tokenize=False, enable_thinking=True)
                 if not prepare_for_update:
                     if self.config.agent_proxy.enable_think:
                         text_with_prompt = text + "<think>"

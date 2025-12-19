@@ -70,6 +70,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 lam=lam,
                 high_level_gamma=high_level_gamma,
             )
+            print("Using bi-level GAE advantage computation.")
         else:
             advantages, returns = core_algos.compute_gae_advantage_return(
                 token_level_rewards=data.batch["token_level_rewards"],
