@@ -4,7 +4,8 @@ from typing import List, Dict, Optional, Union, Any, Tuple
 import os
 import asyncio
 import time
-
+import os
+import re
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from together import AsyncTogether
@@ -85,8 +86,8 @@ class DeepSeekProvider(LLMProvider):
         if response.choices[0].finish_reason in ['length', 'content_filter']:
             print(f'[DEBUG] DeepSeek response finish_reason: {response.choices[0].finish_reason}')
             raise ValueError("Content filtered or length exceeded")
-        print(f'[DEBUG] final content: {response.choices[0].message.content}')
-        print(f'[DEBUG] final reasoning_content: {response.choices[0].message.reasoning_content}')
+        # print(f'[DEBUG] final content: {response.choices[0].message.content}')
+        # print(f'[DEBUG] final reasoning_content: {response.choices[0].message.reasoning_content}')
         return LLMResponse(
             content=response.choices[0].message.content,
             model_name=response.model
@@ -155,6 +156,89 @@ class TogetherProvider(LLMProvider):
             model_name=response.model
         )
 
+class XiaomiProvider(LLMProvider):
+    """XiaomiProvider API provider implementation"""
+    
+    def __init__(self, model_name: str = "gpt-4o", api_key: Optional[str] = None):
+        self.model_name = model_name
+        self.api_key = api_key or os.environ.get("MIMO_API_KEY")
+        if not self.api_key:
+            raise ValueError("XiaomiProvider API key not provided and not found in environment variables")
+        
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url="https://api.xiaomimimo.com/v1")
+    
+    async def generate(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
+        # 1. 检测是否开启了流式传输，默认为 False
+        is_stream = kwargs.get("stream", False)
+        
+        if is_stream:
+            response_stream = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            full_content = []
+            full_reasoning = []
+            final_model = self.model_name
+            
+            async for chunk in response_stream:
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                
+                # 拼接常规内容
+                if delta.content:
+                    full_content.append(delta.content)
+                
+                # 拼接思考内容 (DeepSeek/R1 风格)
+                # 注意：不同库版本可能放在 delta.reasoning_content 或 delta.model_extra['reasoning_content']
+                reasoning_chunk = getattr(delta, 'reasoning_content', None)
+                if reasoning_chunk:
+                    full_reasoning.append(reasoning_chunk)
+                    
+                if chunk.model:
+                    final_model = chunk.model
+
+            content="".join(full_content)
+            reasoning_content="".join(full_reasoning) if full_reasoning else None
+            # print(f'[DEBUG] final streamed content: {content}')
+            # print(f'[DEBUG] final streamed reasoning_content: {reasoning_content}')
+            return LLMResponse(
+                content="".join(full_content),
+                model_name=final_model,
+                # 将思考内容通过 reasoning_content 字段返回
+                # reasoning_content="".join(full_reasoning) if full_reasoning else None
+            )
+
+        else:
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            choice = response.choices[0]
+            
+            # 检查过滤原因
+            if choice.finish_reason in ['length', 'content_filter']:
+                raise ValueError(f"Content filtered or length exceeded: {choice.finish_reason}")
+            
+            message = choice.message
+            
+            # 安全获取 reasoning_content
+            # OpenAI SDK 可能会把非标准字段藏在 model_extra 或直接属性中，使用 getattr 最稳妥
+            reasoning = getattr(message, 'reasoning_content', None)
+            
+            return LLMResponse(
+                content=message.content,
+                model_name=response.model,
+                # 将思考内容通过 reasoning_content 字段返回
+                # reasoning_content=reasoning
+            )
+        
+
 class InfiniaiProvider(LLMProvider):
     """InfiniaiProvider API provider implementation"""
     
@@ -202,8 +286,9 @@ class InfiniaiProvider(LLMProvider):
 
             content="".join(full_content)
             reasoning_content="".join(full_reasoning) if full_reasoning else None
-            print(f'[DEBUG] final streamed content: {content}')
-            print(f'[DEBUG] final streamed reasoning_content: {reasoning_content}')
+            print(f'[DEBUG] final messages content: {messages}')
+            print(f'[DEBUG] final content: {content}')
+            print(f'[DEBUG] final reasoning_content: {reasoning_content}')
             return LLMResponse(
                 content="".join(full_content),
                 model_name=final_model,
@@ -237,6 +322,121 @@ class InfiniaiProvider(LLMProvider):
                 # reasoning_content=reasoning
             )
 
+
+# 假设 LLMResponse 是你自定义的类，保持不变
+# from your_module import LLMResponse 
+
+class VLLMProvider: # (这里略去父类继承定义以便展示)
+    """VLLMProvider API provider implementation"""
+    
+    def __init__(self, model_name: str = "gpt-4o", api_key: Optional[str] = None):
+        self.model_name = model_name
+        self.api_key = api_key or os.environ.get("INFINIAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("VLLMProvider API key not provided and not found in environment variables")
+        
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url="http://0.0.0.0:8003/v1")
+
+    def _extract_reasoning(self, content: str, current_reasoning: Optional[str] = None):
+        """
+        辅助函数：从文本内容中分离 <think>...</think>
+        如果 API 已经返回了 current_reasoning，则优先保留 API 的（虽然 vllm 目前可能为 None）
+        """
+        if not content:
+            return content, current_reasoning
+
+        # 正则匹配 <think> 内容，re.DOTALL 让 . 可以匹配换行符
+        pattern = r"<think>(.*?)</think>"
+        match = re.search(pattern, content, flags=re.DOTALL)
+        
+        if match:
+            # 提取标签内的思考内容
+            extracted_reasoning = match.group(1).strip()
+            
+            # 从原始内容中删除 <think>...</think> 块，并去除首尾空白
+            clean_content = re.sub(pattern, "", content, flags=re.DOTALL).strip()
+            
+            # 如果 API 没有返回 reasoning，就用提取出来的；否则拼接（视具体需求而定）
+            final_reasoning = current_reasoning or extracted_reasoning
+            
+            return clean_content, final_reasoning
+        
+        # 如果没有匹配到标签，直接返回原始内容
+        return content, current_reasoning
+
+    async def generate(self, messages: List[Dict[str, str]], **kwargs) -> "LLMResponse": # type: ignore
+        is_stream = kwargs.get("stream", False)
+        
+        if is_stream:
+            response_stream = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            full_content = []
+            full_reasoning = []
+            final_model = self.model_name
+            
+            async for chunk in response_stream:
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                
+                if delta.content:
+                    full_content.append(delta.content)
+                
+                # 尝试获取 API 返回的 reasoning (DeepSeek 格式)
+                reasoning_chunk = getattr(delta, 'reasoning_content', None)
+                if reasoning_chunk:
+                    full_reasoning.append(reasoning_chunk)
+                    
+                if chunk.model:
+                    final_model = chunk.model
+
+            # 1. 拼接原始文本
+            raw_content = "".join(full_content)
+            api_reasoning = "".join(full_reasoning) if full_reasoning else None
+
+            # 2. 调用清洗函数：分离 <think> 内容
+            final_content, final_reasoning = self._extract_reasoning(raw_content, api_reasoning)
+
+            # print(f'[DEBUG] final streamed clean content: {final_content}')
+            # print(f'[DEBUG] final streamed extracted reasoning: {final_reasoning}')
+            
+            return LLMResponse(
+                content=final_content, # 返回清洗后的内容（不含 think）
+                model_name=final_model,
+                # reasoning_content=final_reasoning # 将思考过程单独存储
+            )
+
+        else:
+            # 非流式处理
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+            
+            choice = response.choices[0]
+            if choice.finish_reason in ['length', 'content_filter']:
+                raise ValueError(f"Content filtered or length exceeded: {choice.finish_reason}")
+            
+            message = choice.message
+            
+            raw_content = message.content
+            api_reasoning = getattr(message, 'reasoning_content', None)
+
+            # 同样调用清洗函数
+            final_content, final_reasoning = self._extract_reasoning(raw_content, api_reasoning)
+
+            return LLMResponse(
+                content=final_content,
+                model_name=response.model,
+                # reasoning_content=final_reasoning
+            )
+        
 class ConcurrentLLM:
     """Unified concurrent interface for multiple LLM providers"""
     
@@ -264,6 +464,11 @@ class ConcurrentLLM:
                 self.provider = TogetherProvider(model_name or "meta-llama/Llama-3-70b-chat-hf", api_key)
             elif provider.lower() == "infiniai":
                 self.provider = InfiniaiProvider(model_name or "qwen3-8b", api_key)
+            elif provider.lower() == "xiaomi":
+                self.provider = XiaomiProvider(model_name or "mimo-v2-flash", api_key)
+            elif provider.lower() == "local":
+                self.provider = VLLMProvider(model_name or "qwen3-4b", api_key)
+                
             else:
                 raise ValueError(f"Unknown provider: {provider}")
         

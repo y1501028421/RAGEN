@@ -20,6 +20,7 @@ from ragen.env import REGISTERED_ENV_CONFIGS
 from tensordict import TensorDict
 
 from dataclasses import asdict
+from ragen.llm_agent.conversation_logger import ConversationLogger
 register_resolvers()
 
 def get_special_tokens(tokenizer: AutoTokenizer):
@@ -100,6 +101,13 @@ class ContextManager:
                 for n_group, env_tag in zip(self.es_cfg.env_configs.n_groups, self.es_cfg.env_configs.tags)
         }
         self._init_prefix_lookup()
+        
+        # Initialize conversation logger
+        experiment_name = config.trainer.experiment_name
+        self.conversation_logger = ConversationLogger(
+            tokenizer=tokenizer,
+            experiment_name=experiment_name
+        )
 
     def _check_env_installed(self, env_type: str):
         if env_type not in REGISTERED_ENV_CONFIGS:
@@ -131,8 +139,9 @@ class ContextManager:
                 )
                 env_instruction += coord_hint
             if env_config_new.get("action_lookup", False):
+                max_actions = self.config.agent_proxy.max_actions_per_turn
                 action_lookup_str = "\nYour available actions are:\n" + ", ".join([f"{v}" for k, v in env_config_new["action_lookup"].items()])
-                action_lookup_str += f"\nYou can take up to {env_config_new['max_actions_per_traj']} actions at a time, separated by the action separator \" " + self.action_sep + " \"\n"
+                action_lookup_str += f"\nYou have a total budget of 20 actions. You can take up to {max_actions} actions per turn, separated by the action separator \" " + self.action_sep + " \"\n"
                 env_instruction += action_lookup_str
             prefixes[env_tag] = env_instruction
             env_config_lookup[env_tag] = {'max_tokens': env_config.get("max_tokens", self.config.actor_rollout_ref.rollout.response_length)}
@@ -154,32 +163,73 @@ class ContextManager:
         self.prefix_lookup = prefix_lookup
         self.env_config_lookup = env_config_lookup
 
-    def _parse_response(self, response: str) -> List:
-        pattern = r'<think>(.*?)</think>\s*<answer>(.*?)</answer>' if self.config.agent_proxy.enable_think else r'<answer>(.*?)</answer>'
-        match = re.search(pattern, response, re.DOTALL)
-        if not match:
-            # think_content, action_content, actions = "", "", [] # do not remove this kind of invalid string
-            llm_response, actions = response, []
-        else:
-            if self.config.agent_proxy.enable_think:
-                think_content, action_content = match.group(1), match.group(2)
+    def _parse_response(self, response: str) -> tuple[str, List[str]]:
+            # 1. 提取 <think> 内容 (如果存在)
+            think_pattern = r"<think>(.*?)</think>"
+            think_match = re.search(think_pattern, response, re.DOTALL)
+            
+            if think_match:
+                think_content = think_match.group(1).strip()
+                # 从 response 中移除 think 部分，剩下的部分用来找 answer
+                remaining_content = re.sub(think_pattern, "", response, flags=re.DOTALL).strip()
             else:
-                think_content, action_content = "", match.group(1)
+                think_content = ""
+                remaining_content = response.strip()
 
-                
+            # 2. 提取 <answer> 内容 (核心修改)
+            # 我们期望剩下的内容里包含 <answer>...</answer>
+            answer_pattern = r"<answer>(.*?)</answer>"
+            answer_match = re.search(answer_pattern, remaining_content, re.DOTALL)
+
+            if answer_match:
+                # Case A: 完美匹配，提取标签内的内容
+                action_content = answer_match.group(1).strip()
+            else:
+                # Case B: 容错处理 (Fallback)
+                # -------------------------------------------------------
+                # 1. 再次尝试清理残留的思维链 (针对 </think> 幸存的情况)
+                if "</think>" in remaining_content:
+                    # 丢弃 </think> 之前的所有内容
+                    remaining_content = remaining_content.split("</think>")[-1]
+
+                # 2. 移除可能存在的破碎标签
+                clean_content = remaining_content.replace("</answer>", "").replace("<answer>", "").strip()
+
+                # 3. 【核心修改】最后一行原则 (Last Line Heuristic)
+                # 假设：如果模型输出了一大段话但没有标签，由于 Agent 通常是 "先思考，后行动"，
+                # 真正的 Action 几乎总是在最后一行。
+                if "\n" in clean_content:
+                    # 按换行符分割，过滤掉空行
+                    lines = [line.strip() for line in clean_content.split('\n') if line.strip()]
+                    if lines:
+                        # 只取最后一行作为动作，前面的默认为思考过程并丢弃
+                        action_content = lines[-1]
+                    else:
+                        action_content = clean_content
+                else:
+                    # 如果只有一行且没标签，只能全部当做动作
+                    action_content = clean_content
+
+            # 3. 清理特殊 token (保持原样)
             for special_token in self.special_token_list:
                 action_content = action_content.replace(special_token, "").strip()
                 think_content = think_content.replace(special_token, "").strip()
             
+            # 4. 分割动作 (保持原样)
             actions = [action.strip() for action in action_content.split(self.action_sep) if action.strip()]
             max_actions = self.config.agent_proxy.max_actions_per_turn
 
             if len(actions) > max_actions:
-                actions = actions[:max_actions] #Only the first MAX_ACTIONS actions are kept in the rollout.
+                actions = actions[:max_actions]
                 action_content = (" " + self.action_sep + " ").join(actions)
 
-            llm_response = f"<think>{think_content}</think><answer>{action_content}</answer>" if self.config.agent_proxy.enable_think else f"<answer>{action_content}</answer>"
-        return llm_response, actions
+            # 5. 重组 llm_response (存入历史)
+            if think_content:
+                llm_response = f"<think>{think_content}</think>\n<answer>{action_content}</answer>"
+            else:
+                llm_response = f"<answer>{action_content}</answer>"
+                
+            return llm_response, actions
         
     def _normalize_score_tensor(self, score_tensor: torch.Tensor, env_outputs: List[Dict]) -> torch.Tensor:
         """
@@ -271,10 +321,22 @@ class ContextManager:
                         FORMAT_PROMPT = "<answer> [your answer] </answer>" if self.config.agent_proxy.enable_think else "<answer> [your answer] </answer>"
                         LENGTH_PROMPT = f"Max response length: {self.env_config_lookup[env_output['env_id']]['max_tokens']} words (tokens)."
                         # messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Always output: {FORMAT_PROMPT} with no extra text. Strictly follow this format. {LENGTH_PROMPT}\n"
-                        messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Always output: {FORMAT_PROMPT} with no extra text. Strictly follow this format.\n"
+                        # messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Always output: {FORMAT_PROMPT} with no extra text. Strictly follow this format.\n"
 
+                        messages[-1]["content"] += f"State:\n{content['state']}\nYou have {content['actions_left']} actions left. Choose action(s) and output {FORMAT_PROMPT} with no extra text after you finish the thinking process.\n"
+                        messages[-1]["content"] += f"Strictly follow the above format and keep your thinking process concise. Responses that do not follow the format will result in immediate loss of the game."
+                        
                     if "llm_response" in content:
-                        messages.append({"role": "assistant", "content": content["llm_response"]})
+                        # Remove <think>...</think> content to avoid passing it to next turns
+                        print("[debug] original llm_response:", content["llm_response"])
+                        print("[debug] messages before processing:", messages)
+                        llm_response = content["llm_response"]
+                        
+                        llm_response = re.sub(r'<think>.*?</think>\s*', '', llm_response, flags=re.DOTALL)
+                        messages.append({"role": "assistant", "content": llm_response})
+                        
+                        print("[debug] processed llm_response:", llm_response)
+                        print("[debug] processed messages:", messages)
                     if "reward" in content and not (prepare_for_update and idx == len(history) - 1):
                         messages.append({"role": "user", "content": f"Reward:\n{content['reward']}\n"})
 
@@ -284,10 +346,14 @@ class ContextManager:
 
                 text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=(not prepare_for_update), tokenize=False, enable_thinking=True)
                 if not prepare_for_update:
-                    if self.config.agent_proxy.enable_think:
-                        text_with_prompt = text + "<think>"
-                    else:
-                        text_with_prompt = text + "<answer>"
+                    # 旧逻辑：在<|im_start|>assistant后，强行加 <think>，qwen3不需要
+                    # if self.config.agent_proxy.enable_think:
+                    #     text_with_prompt = text + "<think>"
+                    #     print("[debug] text_with_prompt:", text_with_prompt)
+                    #     print("[debug] messages:", text)
+                    # else:
+                    #     text_with_prompt = text + "<answer>"
+                    text_with_prompt = text
                 else:
                     text_with_prompt = text
 
@@ -377,12 +443,19 @@ class ContextManager:
             )
         else: # dataproto has textual responses
             responses = lm_outputs.non_tensor_batch['response_texts']
-        responses = ["<think>" + response if self.config.agent_proxy.enable_think else "<answer>" + response for response in responses] # The LLM generation does not include <think> tags. Add them back here.
+        # responses = ["<think>" + response if self.config.agent_proxy.enable_think else "<answer>" + response for response in responses] # The LLM generation does not include <think> tags. Add them back here.
             
         env_ids = lm_outputs.non_tensor_batch['env_ids']
         env_inputs = []
         for env_id, response in zip(env_ids, responses):
             llm_response, actions = self._parse_response(response)
+            print("Raw response:", response)
+            print("Parsed llm_response:", llm_response)
+            print("Parsed actions:", actions)
+            # if env_id == 1:
+            #     print("Raw response:", response)
+            #     print("Parsed llm_response:", llm_response)
+            #     print("Parsed actions:", actions)
             env_inputs.append({
                 "env_id": env_id,
                 "llm_raw_response": response,
@@ -391,10 +464,27 @@ class ContextManager:
             })
         return env_inputs
 
-    def formulate_rollouts(self, env_outputs: List[Dict]) -> DataProto:
-        llm_inputs = self.get_lm_inputs(env_outputs, prepare_for_update=True)
-        return llm_inputs
+    # def formulate_rollouts(self, env_outputs: List[Dict]) -> DataProto:
+    #     llm_inputs = self.get_lm_inputs(env_outputs, prepare_for_update=True)
+    #     return llm_inputs
 
+    def formulate_rollouts(self, env_outputs: List[Dict], global_step: int = 0, phase: str = "train", log_conversations: bool = True) -> DataProto:
+        llm_inputs = self.get_lm_inputs(env_outputs, prepare_for_update=True)
+        
+        # Log detailed conversations if enabled
+        if log_conversations and hasattr(self, 'conversation_logger'):
+            # Pass the actual input_ids (tokenized conversation with special tokens)
+            input_ids_batch = llm_inputs.batch.get('input_ids', None)
+            if input_ids_batch is not None:
+                self.conversation_logger.log_batch_conversations(
+                    env_outputs=env_outputs,
+                    input_ids_batch=input_ids_batch,
+                    step=global_step,
+                    phase=phase,
+                    max_samples=10
+                )
+        
+        return llm_inputs
     
 
 

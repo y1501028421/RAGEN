@@ -45,13 +45,66 @@ class SokobanEnv(BaseDiscreteActionEnv, GymSokobanEnv):
         except (RuntimeError, RuntimeWarning) as e:
             next_seed = abs(hash(str(seed))) % (2 ** 32) if seed is not None else None
             return self.reset(next_seed)
+    
+    # --- 新增：死锁检测辅助函数 ---
+    def _check_deadlock(self, box_pos):
+        """
+        检查箱子是否处于简单的角落死锁位置。
+        """
+        room_state = self.room_state
+        row, col = box_pos
         
+        # 获取墙壁位置 (通常 0 代表墙)
+        walls = (room_state == 0)
+        
+        # 边界检查（防止索引越界，虽然 gym-sokoban 通常有围墙）
+        if row == 0 or row == room_state.shape[0]-1 or col == 0 or col == room_state.shape[1]-1:
+            return True
+
+        top_wall = walls[row-1, col]
+        bottom_wall = walls[row+1, col]
+        left_wall = walls[row, col-1]
+        right_wall = walls[row, col+1]
+        
+        # 只要满足任意一个角落条件，即视为死锁
+        if (top_wall and left_wall) or \
+           (top_wall and right_wall) or \
+           (bottom_wall and left_wall) or \
+           (bottom_wall and right_wall):
+            return True
+        
+        return False
+    # ---------------------------
+
     def step(self, action: int):
         previous_pos = self.player_position
         _, reward, done, _ = GymSokobanEnv.step(self, action) 
+        
+        # --- 修改：增加死锁检测逻辑 ---
+        # 如果还没结束，检查是否有箱子死锁
+        if not done:
+            # 获取所有未归位箱子的位置 (room_state == 4 代表普通箱子)
+            box_positions = np.argwhere(self.room_state == 4)
+            for box_pos in box_positions:
+                if self._check_deadlock(box_pos):
+                    done = True
+                    print("Deadlock detected at box position:", box_pos)
+                    break
+        # ---------------------------
+
         next_obs = self.render()
         action_effective = not np.array_equal(previous_pos, self.player_position)
-        info = {"action_is_effective": action_effective, "action_is_valid": True, "success": self.boxes_on_target == self.num_boxes}
+        
+        info = {
+            "action_is_effective": action_effective, 
+            "action_is_valid": True, 
+            "success": self.boxes_on_target == self.num_boxes
+        }
+        
+        # 可选：如果你想在 info 里标记是因为死锁结束的，可以加这一行
+        if done and not info["success"]:
+            info["deadlock"] = True
+
         return next_obs, reward, done, info
 
     def render(self, mode=None):

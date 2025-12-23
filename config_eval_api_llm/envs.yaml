@@ -59,7 +59,8 @@ custom_envs:
 
   CoordSokoban:
     env_type: sokoban
-    max_actions_per_traj: 3
+    max_actions_per_traj: 10
+    
     env_instruction: |
       You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets.
       You are provided with a symbol grid and the zero-indexed coordinates of the player, each box, and each target. 

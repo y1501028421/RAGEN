@@ -51,6 +51,8 @@ from verl.utils.torch_functional import masked_mean
 from ragen.llm_agent.agent_proxy import LLMAgentProxy
 from ragen.utils import GenerationsLogger
 from ragen.trainer.rollout_filter import build_rollout_filter
+from ragen.llm_agent.terminal_logger import setup_terminal_logging
+from ragen.llm_agent.terminal_logger import setup_terminal_logging
 
 
 
@@ -152,6 +154,14 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                  reward_fn=None,
                  val_reward_fn=None):
 
+                # Setup terminal logger (will auto-start when SwanLab initializes)
+        experiment_name = config.trainer.experiment_name
+        self._terminal_logger = setup_terminal_logging(experiment_name)
+        
+                # Setup terminal logger (will auto-start when SwanLab initializes)
+        experiment_name = config.trainer.experiment_name
+        self._terminal_logger = setup_terminal_logging(experiment_name)
+        
         super().__init__(config, tokenizer, role_worker_mapping, resource_pool_manager, ray_worker_group_cls, processor, reward_fn, val_reward_fn)
         self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
         # do not use the original val logger, but use this here
